@@ -14,13 +14,18 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]
 HOST="${DELLA_HOST:-della9.princeton.edu}"
 DELLA_USER="${DELLA_USER:-}"
 CONNECT_TIMEOUT="${DELLA_CONNECT_TIMEOUT:-8}"
+ANACONDA_MODULE="${DELLA_ANACONDA_MODULE:-anaconda3/2024.2}"   # used by gpucheck
+CONDA_ENV="${DELLA_CONDA_ENV:-jax-gpu}"                        # default env for gpucheck
+
+# ControlMaster sockets live here; ssh silently skips multiplexing if it is missing.
+mkdir -p "${HOME}/.ssh/sockets" && chmod 700 "${HOME}/.ssh/sockets"
 
 # Self-contained connection options: user, multiplexing, and no proxy —
 # independent of whatever ~/.ssh/config says for this host.
 BASE_OPTS=(
   -o ProxyJump=none
   -o ControlMaster=auto
-  -o ControlPath="${HOME}/.ssh/sockets/%p-%h-%r"
+  -o ControlPath=~/.ssh/sockets/%p-%h-%r
   -o ControlPersist=yes
   -o ServerAliveInterval=300
 )
@@ -38,9 +43,9 @@ conn_hint() {
 No live SSH connection to ${HOST} (Duo login required).
 Open one from your own terminal (it persists via ControlMaster):
 
-    ${SELF} connect
+    $(printf '%q' "${SELF}") connect
 
-In Claude Code, type:  ! ${SELF} connect
+In Claude Code, type:  ! $(printf '%q' "${SELF}") connect
 
 Then retry this command.
 EOF
@@ -91,7 +96,8 @@ Cluster
   queue [partition]             Cluster load; with partition: sinfo + your pending reasons
 
 Environment: DELLA_HOST (default della9.princeton.edu), DELLA_USER (optional; otherwise SSH configuration),
-             DELLA_CONNECT_TIMEOUT (default 8)
+             DELLA_CONNECT_TIMEOUT (default 8), DELLA_ANACONDA_MODULE (default anaconda3/2024.2),
+             DELLA_CONDA_ENV (default jax-gpu; used by gpucheck)
 EOF
 }
 
@@ -209,7 +215,7 @@ case "$cmd" in
     [ $# -ge 1 ] || die "usage: della.sh test '<cmd>' [secs]"
     secs="${2:-30}"
     remote "timeout ${secs} bash -lc $(printf '%q' "$1")" \
-      || { rc=$?; [ "$rc" -eq 124 ] && echo "(killed by ${secs}s timeout — that may be fine for a sanity check)"; exit "$rc"; }
+      || { rc=$?; [ "$rc" -eq 124 ] && echo "(killed by ${secs}s timeout — check the output above for the expected milestone; a timeout alone is not a pass)"; exit "$rc"; }
     ;;
 
   gpus)
@@ -225,7 +231,7 @@ case "$cmd" in
     ;;
 
   gpucheck)
-    env_name="${1:-jax-gpu}"
+    env_name="${1:-${CONDA_ENV}}"
     check_py='import sys
 try:
     import torch
@@ -238,7 +244,7 @@ try:
     print("jax", jax.__version__, "devices:", jax.devices())
 except Exception as e:
     print("jax check failed:", e)'
-    cmd="module purge; module load anaconda3/2024.2; conda activate ${env_name}; nvidia-smi -L; python - <<'PYEOF'
+    cmd="module purge; module load ${ANACONDA_MODULE}; conda activate ${env_name}; nvidia-smi -L; python - <<'PYEOF'
 ${check_py}
 PYEOF"
     echo "Verifying conda env '${env_name}' on a MIG GPU slice (blocks until allocated)..." >&2

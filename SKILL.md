@@ -36,9 +36,12 @@ socket; then retry. If `check` says "ControlMaster: not running" but the remote
 command still succeeds, a fresh connection worked without Duo — proceed normally.
 
 The helper defaults to `della9.princeton.edu` with explicit multiplexing options
-and `ProxyJump=none`. Set `DELLA_USER` locally to your cluster account, or let
-OpenSSH resolve it from your SSH configuration. `DELLA_HOST` overrides the host.
-Never put account identifiers, passwords, SSH keys, or tokens in this repository.
+and `ProxyJump=none`. Set `DELLA_USER` in the local shell to the cluster account
+unless `~/.ssh/config` already sets `User` for the host; otherwise SSH falls back
+to the local login name and every command fails with `Permission denied`.
+`DELLA_HOST` overrides the host; `DELLA_ANACONDA_MODULE` and `DELLA_CONDA_ENV`
+set the module and conda env that `gpucheck` loads. Never put account
+identifiers, passwords, SSH keys, or tokens in this repository.
 
 Host-specific notes:
 
@@ -71,7 +74,7 @@ Host-specific notes:
 | Partition load + why jobs pend | `queue [partition]` |
 | GPU node availability | `gpus [partitions]` (default `gpu,mig`) |
 | Run a command on a GPU node | `gputest '<cmd>' [min] [partition] [gres]` |
-| Verify conda env sees the GPU | `gpucheck [env]` (default env `jax-gpu`) |
+| Verify conda env sees the GPU | `gpucheck [env]` (default env `jax-gpu`; override with `DELLA_CONDA_ENV` / `DELLA_ANACONDA_MODULE`) |
 | GPU/CPU/memory efficiency report | `jobstats <jobid>` (works on finished jobs) |
 | Live GPU utilization of a running job | `gpuwatch <jobid>` |
 
