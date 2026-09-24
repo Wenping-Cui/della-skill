@@ -7,6 +7,10 @@
 # fast (BatchMode=yes) with instructions to authenticate.
 set -euo pipefail
 
+# Absolute path of this script, so hints work wherever the skill is installed
+# (~/.claude/skills/della for Claude Code, ~/.codex/skills/della for Codex, ...).
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
 HOST="${DELLA_HOST:-della9.princeton.edu}"
 DELLA_USER="${DELLA_USER:-}"
 CONNECT_TIMEOUT="${DELLA_CONNECT_TIMEOUT:-8}"
@@ -34,7 +38,9 @@ conn_hint() {
 No live SSH connection to ${HOST} (Duo login required).
 Open one from your own terminal (it persists via ControlMaster):
 
-    ~/.codex/skills/della/scripts/della.sh connect
+    ${SELF} connect
+
+In Claude Code, type:  ! ${SELF} connect
 
 Then retry this command.
 EOF

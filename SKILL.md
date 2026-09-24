@@ -5,28 +5,31 @@ description: Submit, monitor, debug, and cancel Slurm jobs on Princeton's Della 
 
 # Della cluster operations
 
-All operations go through the helper script:
+All operations go through the helper script `scripts/della.sh`, which lives next
+to this SKILL.md. Resolve it relative to the skill's install location:
 
 ```bash
-~/.codex/skills/della/scripts/della.sh <command> [args]
+~/.claude/skills/della/scripts/della.sh <command> [args]   # Claude Code
+~/.codex/skills/della/scripts/della.sh <command> [args]    # Codex
 ```
 
-It reuses the user's SSH ControlMaster socket with explicit direct-connection
-options (`ProxyJump=none`). It never handles credentials. Resolve the helper
-relative to this SKILL.md if the skill is installed at a custom location.
+Below, `della.sh` means that resolved path. It reuses the user's SSH
+ControlMaster socket with explicit direct-connection options (`ProxyJump=none`).
+It never handles credentials.
 
 ## Connection check before remote operations
 
 ```bash
-~/.codex/skills/della/scripts/della.sh check
+della.sh check
 ```
 
 If it reports no live connection, **you cannot fix this yourself** — Duo 2FA needs
-the user. Ask them to run this in their own interactive terminal:
+the user. Ask them to run `della.sh connect` themselves:
 
-```
-~/.codex/skills/della/scripts/della.sh connect
-```
+- **Claude Code:** tell them to type it with the `!` prefix so the Duo prompt
+  appears in their session, e.g. `! ~/.claude/skills/della/scripts/della.sh connect`
+- **Codex:** ask them to run it in their own interactive terminal, e.g.
+  `~/.codex/skills/della/scripts/della.sh connect`
 
 That authenticates once (interactive password/Duo) and leaves a persistent master
 socket; then retry. If `check` says "ControlMaster: not running" but the remote
@@ -37,10 +40,15 @@ and `ProxyJump=none`. Set `DELLA_USER` locally to your cluster account, or let
 OpenSSH resolve it from your SSH configuration. `DELLA_HOST` overrides the host.
 Never put account identifiers, passwords, SSH keys, or tokens in this repository.
 
-Use Codex shell execution for the helper. If sandbox restrictions block SSH or
-its control socket, request execution escalation through the tool; do not
-misdiagnose a sandbox denial as an authentication failure. Run blocking GPU
-allocations in a yielding shell session so progress can still be reported.
+Host-specific notes:
+
+- **Claude Code:** run the helper with the Bash tool. Blocking commands
+  (`gputest`, `gpucheck`, long `test` runs) can take minutes; give them a
+  generous timeout or run them in the background and report when they finish.
+- **Codex:** use shell execution. If sandbox restrictions block SSH or its
+  control socket, request execution escalation through the tool; do not
+  misdiagnose a sandbox denial as an authentication failure. Run blocking GPU
+  allocations in a yielding shell session so progress can still be reported.
 
 ## Commands
 
@@ -156,7 +164,7 @@ at write time). If failures look I/O-related, run `quota` early.
 - Don't run heavy computation via `run` — login nodes are shared; that's what `test` (with timeout) and `submit` are for.
 - Sweep submissions: prefer one Slurm job array (`sbatch --array=0-39`) over 40 separate submits; `sweep <array-id>` then summarizes it in one call.
 
-Run `scripts/della.sh help` for CLI usage. Dependencies: local Bash, OpenSSH,
+Run `della.sh help` for CLI usage. Dependencies: local Bash, OpenSSH,
 and rsync; network access to Della (campus network or VPN); remote Slurm and
 Princeton cluster utilities. The `logs` fallback assumes `slurm-<jobid>.out`;
 for completed jobs with custom output paths, read the configured file directly.
