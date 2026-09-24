@@ -1,0 +1,3 @@
+interface:
+  display_name: "Della"
+  short_description: "Manage Princeton Della jobs and file transfers"

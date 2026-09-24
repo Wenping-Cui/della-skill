@@ -1,0 +1,16 @@
+# Local authentication and configuration
+.env
+.env.*
+!.env.example
+*.local
+.ssh/
+*id_rsa*
+*id_ed25519*
+*.pem
+*.key
+credentials*
+secrets*
+# Runtime artifacts
+*.log
+__pycache__/
+.DS_Store
