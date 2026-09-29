@@ -12,7 +12,11 @@ set -euo pipefail
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
 HOST="${DELLA_HOST:-della9.princeton.edu}"
-DELLA_USER="${DELLA_USER:-}"
+# Cluster account (NetID): $DELLA_USER, else the one-line file
+# ~/.config/della/user -- kept OUT of this repository, which must never contain
+# account identifiers -- else whatever ~/.ssh/config sets for the host.
+DELLA_USER_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/della/user"
+DELLA_USER="${DELLA_USER:-$( { tr -d '[:space:]' < "${DELLA_USER_FILE}"; } 2>/dev/null || true)}"
 CONNECT_TIMEOUT="${DELLA_CONNECT_TIMEOUT:-8}"
 ANACONDA_MODULE="${DELLA_ANACONDA_MODULE:-anaconda3/2024.2}"   # used by gpucheck
 CONDA_ENV="${DELLA_CONDA_ENV:-jax-gpu}"                        # default env for gpucheck
@@ -37,11 +41,109 @@ RSYNC_SSH="ssh $(printf '%s ' "${BASE_OPTS[@]}") -o BatchMode=yes -o ConnectTime
 
 die() { echo "della: $*" >&2; exit 1; }
 
+# Resolve the cluster username without guessing. Order: $DELLA_USER, the file
+# ~/.config/della/user (both applied above), then a User that ~/.ssh/config sets
+# explicitly for this host. The local login name is NOT an acceptable fallback:
+# using it silently is what produces "Permission denied" and, after repeats, a
+# temporary block on this machine's address.
+resolve_user() {
+  [ -n "${DELLA_USER}" ] && return 0
+  local u; u="$(ssh -G "${HOST}" 2>/dev/null | awk '/^user /{print $2; exit}')"
+  if [ -n "$u" ] && [ "$u" != "$(id -un)" ]; then DELLA_USER="$u"; return 0; fi
+  return 1
+}
+
+save_user() {
+  [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "not a valid username: '$1'"
+  mkdir -p "$(dirname "${DELLA_USER_FILE}")"
+  printf '%s\n' "$1" > "${DELLA_USER_FILE}" && chmod 600 "${DELLA_USER_FILE}"
+  DELLA_USER="$1"
+}
+
+no_user_hint() {
+  cat >&2 <<EOF
+
+No Della username is configured, so nothing was attempted (guessing the local
+login name "$(id -un)" would fail and can get this address blocked).
+Set it once:
+
+    $(printf '%q' "${SELF}") user <your-Princeton-NetID>
+
+or just run  $(printf '%q' "${SELF}") connect  and it will ask.
+EOF
+}
+
+# True if a ControlMaster session is live. Talks only to the LOCAL control
+# socket -- it never opens a connection to the login node.
+have_master() { ssh "${BASE_OPTS[@]}" -O check "${HOST}" >/dev/null 2>&1; }
+
+# The login node's SSH banner, read without authenticating. While Princeton is
+# temporarily refusing an address (typically after repeated failed logins) the
+# node answers "Not allowed at this time" instead of an SSH banner.
+banner() {
+  timeout "${CONNECT_TIMEOUT}" bash -c "exec 3<>/dev/tcp/${HOST}/22 && head -c 80 <&3" \
+    2>/dev/null | tr -d '\r\n' || true
+}
+
+blocked_hint() {
+  cat >&2 <<EOF
+
+${HOST} is refusing connections from this address ("Not allowed at this time").
+This is a temporary server-side block, usually after repeated failed or rapid
+logins; it normally clears within minutes to an hour. Every further attempt can
+extend it, so do not retry in a loop.
+
+Either wait, or log in through another login node (same /scratch filesystem):
+
+    DELLA_HOST=della8.princeton.edu $(printf '%q' "${SELF}") connect
+EOF
+}
+
+# explain_failure <stderr-file>: say WHY ssh failed instead of always "log in".
+explain_failure() {
+  local f="$1"
+  if grep -qiE 'not allowed at this time|kex_exchange_identification|connection reset by peer' "$f"; then
+    blocked_hint
+  elif grep -qiE 'password (has )?expired|change your password|must change|password change required' "$f"; then
+    cat >&2 <<EOF
+
+The NetID password has expired. Change your Princeton NetID password
+(OIT password page, or at the prompt if the login offers it), then:
+
+    $(printf '%q' "${SELF}") connect
+EOF
+  elif grep -qi 'permission denied' "$f"; then
+    cat >&2 <<EOF
+
+Authentication failed as ${DELLA_USER}@${HOST}. Check, in order:
+  - the NetID (${DELLA_USER:-unset, so ~/.config/ssh decides}; set DELLA_USER or ${DELLA_USER_FILE}),
+  - that the NetID password has not expired or changed,
+  - that the Duo approval went through.
+Repeated failures get this address temporarily blocked -- stop after one or two.
+EOF
+  elif grep -qiE 'timed out|no route to host|could not resolve|network is unreachable' "$f"; then
+    echo >&2
+    echo "Cannot reach ${HOST}: off campus without the Princeton VPN, or a network problem." >&2
+  else
+    conn_hint
+  fi
+}
+
+# Fail fast, locally, when there is no live session. Without this every command
+# would open a fresh (doomed, BatchMode) connection to the login node, and a
+# burst of those looks like a password-guessing attack to Princeton's blocker.
+require_master() {
+  if ! resolve_user; then no_user_hint; exit 255; fi
+  have_master && return 0
+  conn_hint          # purely local: no banner probe, no connection attempt
+  exit 255
+}
+
 conn_hint() {
   cat >&2 <<EOF
 
-No live SSH connection to ${HOST} (Duo login required).
-Open one from your own terminal (it persists via ControlMaster):
+No live SSH session to ${HOST} as ${DELLA_USER:-<ssh-config user>}. Nothing was sent to the
+cluster. Open a session once (password + Duo); it persists via ControlMaster:
 
     $(printf '%q' "${SELF}") connect
 
@@ -53,9 +155,12 @@ EOF
 
 # remote '<command string>'  — run on the login node over the shared socket
 remote() {
-  local rc=0
-  ssh "${SSH_OPTS[@]}" "${HOST}" "$1" || rc=$?
-  if [ "$rc" -eq 255 ]; then conn_hint; fi
+  require_master
+  local rc=0 errf; errf="$(mktemp)"
+  ssh "${SSH_OPTS[@]}" "${HOST}" "$1" 2> >(tee "$errf" >&2) || rc=$?
+  wait 2>/dev/null || true
+  if [ "$rc" -eq 255 ]; then explain_failure "$errf"; fi
+  rm -f "$errf"
   return "$rc"
 }
 
@@ -64,6 +169,7 @@ usage() {
 Usage: della.sh <command> [args]
 
 Connection
+  user [netid]                  Show the cluster username, or save it (asked once; kept out of the repo)
   connect                       Interactive login (Duo) that leaves a persistent master socket
   check                         Master-socket status + remote identity + queue summary
   run '<cmd>'                   Run an arbitrary command on the login node
@@ -76,6 +182,9 @@ Files
 
 Jobs
   submit <remote-workdir> <script> [sbatch-args...]   sbatch from a directory; prints job id
+  rightsize <ids>|--name <n>    Requested vs used time/RAM per configuration (tasks alike but for
+                                the seed); suggest 1.5x the peak. [--since DATE] (30 days),
+                                [--factor F] (1.5), [--by config|name], [--match REGEX]
   status [jobid]                No arg: your squeue. With id: sacct detail (incl. steps/MaxRSS)
   hist [since]                  sacct history (default: since today 00:00)
   logs <jobid> [n]              Tail the job's stdout file (default 60 lines)
@@ -95,7 +204,7 @@ Cluster
   quota                         checkquota (scratch/home usage)
   queue [partition]             Cluster load; with partition: sinfo + your pending reasons
 
-Environment: DELLA_HOST (default della9.princeton.edu), DELLA_USER (optional; otherwise SSH configuration),
+Environment: DELLA_HOST (default della9.princeton.edu), DELLA_USER (or ~/.config/della/user; else SSH configuration),
              DELLA_CONNECT_TIMEOUT (default 8), DELLA_ANACONDA_MODULE (default anaconda3/2024.2),
              DELLA_CONDA_ENV (default jax-gpu; used by gpucheck)
 EOF
@@ -108,18 +217,57 @@ case "$cmd" in
     usage
     ;;
 
+  user)
+    # della.sh user          -> print the resolved username (exit 1 if unset)
+    # della.sh user <netid>  -> save it to ~/.config/della/user (outside the repo)
+    if [ $# -ge 1 ]; then
+      save_user "$1"; echo "Saved Della username to ${DELLA_USER_FILE}"
+    elif resolve_user; then
+      echo "${DELLA_USER}"
+    else
+      echo "not set"; exit 1
+    fi
+    ;;
+
   connect)
     # Interactive (no BatchMode): shows the password/Duo prompt in this terminal,
     # then exits, leaving the ControlPersist master alive for all later commands.
-    ssh "${BASE_OPTS[@]}" "${HOST}" exit \
-      && echo "Authenticated. Master socket is live; batch commands will now work."
+    if ! resolve_user; then
+      if [ -t 0 ]; then
+        read -rp "Della username (Princeton NetID): " u
+        save_user "$u"
+        echo "Saved to ${DELLA_USER_FILE}"
+      else
+        no_user_hint; exit 1
+      fi
+    fi
+    BASE_OPTS+=(-o User="${DELLA_USER}")
+    if have_master; then
+      echo "Already connected to ${HOST} as ${DELLA_USER:-<ssh-config user>} (master socket live)."; exit 0
+    fi
+    b="$(banner)"
+    if [[ "$b" == *"Not allowed"* ]]; then blocked_hint; exit 1; fi
+    echo "Connecting to ${DELLA_USER:+${DELLA_USER}@}${HOST} ..."
+    errf="$(mktemp)"; rc=0
+    ssh "${BASE_OPTS[@]}" "${HOST}" exit 2> >(tee "$errf" >&2) || rc=$?
+    wait 2>/dev/null || true
+    if [ "$rc" -eq 0 ]; then
+      echo "Authenticated. Master socket is live; batch commands will now work."
+    else
+      explain_failure "$errf"
+    fi
+    rm -f "$errf"; exit "$rc"
     ;;
 
   check)
-    if ssh "${BASE_OPTS[@]}" -O check "${HOST}" 2>/dev/null; then
-      echo "ControlMaster: live"
+    if have_master; then
+      echo "ControlMaster: live (${DELLA_USER:+${DELLA_USER}@}${HOST})"
     else
-      echo "ControlMaster: not running (will attempt fresh batch-mode connection)"
+      echo "ControlMaster: not running for ${DELLA_USER:+${DELLA_USER}@}${HOST}"
+      b="$(banner)"
+      echo "Login-node banner: ${b:-<no response>}"
+      if [[ "$b" == *"Not allowed"* ]]; then blocked_hint; else conn_hint; fi
+      exit 255
     fi
     remote 'echo "host: $(hostname)  user: $USER  time: $(date "+%F %T")"; nq=$(squeue -u $USER -h 2>/dev/null | wc -l); echo "your jobs in queue: $nq"'
     ;;
@@ -130,6 +278,7 @@ case "$cmd" in
     ;;
 
   push)
+    require_master
     [ $# -ge 2 ] || die "usage: della.sh push <local> <remote> [rsync-args...]"
     src="$1"; dst="$2"; shift 2
     rsync -az --human-readable --info=stats1 -e "${RSYNC_SSH}" \
@@ -137,6 +286,7 @@ case "$cmd" in
     ;;
 
   pull)
+    require_master
     [ $# -ge 2 ] || die "usage: della.sh pull <remote> <local> [rsync-args...]"
     src="$1"; dst="$2"; shift 2
     rsync -az --human-readable --info=stats1 -e "${RSYNC_SSH}" \
@@ -166,6 +316,29 @@ case "$cmd" in
     echo "$out"
     jobid=$(echo "$out" | grep -oE '[0-9]+' | tail -1 || true)
     [ -n "$jobid" ] && echo "JOBID=$jobid"
+    ;;
+
+  rightsize)
+    # rightsize <jobid[,jobid...]> | --name <jobname>  [--since DATE] [--factor F]
+    #           [--by config|name] [--match REGEX]
+    [ $# -ge 1 ] || die "usage: della.sh rightsize <jobid[,jobid...]> | --name <jobname> [--since DATE] [--factor 1.5] [--by config|name] [--match REGEX]"
+    sel=(); since="$(date -d '-30 days' +%F)"; factor=1.5; local_args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name)   sel=("--name=$2"); shift 2 ;;
+        --since)  since="$2"; shift 2 ;;
+        --factor) factor="$2"; shift 2 ;;
+        --by)     local_args+=(--by "$2"); shift 2 ;;
+        --match)  local_args+=(--match "$2"); shift 2 ;;
+        *)        sel=("-j" "$1"); shift ;;
+      esac
+    done
+    # The collector runs on the login node (it must read each task's log);
+    # ship it as base64 so no quoting survives the ssh round trip.
+    b64="$(base64 -w0 "$(dirname "${SELF}")/rightsize_collect.py")"
+    rargs=""; for a in "${sel[@]}" -S "$since"; do rargs+=" $(printf '%q' "$a")"; done
+    remote "echo ${b64} | base64 -d | python3 -${rargs}" 2>/dev/null \
+      | python3 "$(dirname "${SELF}")/rightsize.py" "$factor" "${local_args[@]}"
     ;;
 
   status)

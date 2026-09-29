@@ -17,6 +17,26 @@ Below, `della.sh` means that resolved path. It reuses the user's SSH
 ControlMaster socket with explicit direct-connection options (`ProxyJump=none`).
 It never handles credentials.
 
+## Username (ask first)
+
+Before the first connection on a machine, run:
+
+```bash
+della.sh user
+```
+
+If it prints `not set`, **ask the user for their Princeton NetID** — do not guess,
+and never fall back to the local login name (that fails with `Permission denied`
+and repeated failures get the machine blocked). Then save it:
+
+```bash
+della.sh user <netid>
+```
+
+It is stored in `~/.config/della/user` (mode 600, outside this repository —
+account identifiers must never be committed). `connect` also asks for it
+interactively if it is missing.
+
 ## Connection check before remote operations
 
 ```bash
@@ -32,13 +52,16 @@ the user. Ask them to run `della.sh connect` themselves:
   `~/.codex/skills/della/scripts/della.sh connect`
 
 That authenticates once (interactive password/Duo) and leaves a persistent master
-socket; then retry. If `check` says "ControlMaster: not running" but the remote
-command still succeeds, a fresh connection worked without Duo — proceed normally.
+socket; then retry. Without a live socket every remote command fails locally
+(nothing is sent to the cluster), so retrying before `connect` achieves nothing.
 
 The helper defaults to `della9.princeton.edu` with explicit multiplexing options
-and `ProxyJump=none`. Set `DELLA_USER` in the local shell to the cluster account
-unless `~/.ssh/config` already sets `User` for the host; otherwise SSH falls back
-to the local login name and every command fails with `Permission denied`.
+and `ProxyJump=none`. The cluster account comes from `DELLA_USER`, else the
+one-line file `~/.config/della/user` (outside this repository), else the `User`
+that `~/.ssh/config` sets for the host. If none applies, SSH falls back to the
+local login name and every login fails with `Permission denied` — and repeated
+failures get the address blocked. Set it once with
+`mkdir -p ~/.config/della && echo <netid> > ~/.config/della/user`.
 `DELLA_HOST` overrides the host; `DELLA_ANACONDA_MODULE` and `DELLA_CONDA_ENV`
 set the module and conda env that `gpucheck` loads. Never put account
 identifiers, passwords, SSH keys, or tokens in this repository.
@@ -160,6 +183,51 @@ but don't stack many; one at a time.
 **Quota problems** masquerade as random crashes (`Disk quota exceeded`, jobs dying
 at write time). If failures look I/O-related, run `quota` early.
 
+## Right-size requests: 1.5x the observed peak
+
+Before submitting a job that repeats or resembles earlier ones, check what the
+**similar** past tasks actually used — tasks that ran the same configuration and
+differ only by seed, not everything under one job name:
+
+```bash
+della.sh rightsize --name <jobname> --match '<config fragment>'   # e.g. --match 'mode=last N=1024 '
+della.sh rightsize <jobid[,jobid...]>                             # all configurations, one block each
+```
+
+Slurm stores no per-task configuration, so `rightsize` reads the first line of
+each task's stdout log (the config line the job script echoes) with seed tokens
+stripped, and groups tasks by it. Consequently:
+
+- **Job scripts should echo their configuration as the first log line**
+  (e.g. `echo "mode=$MODE N=$N B=$B seed=$SEED :: $FLAGS"`); without it, tasks
+  fall back to being grouped by job name.
+- **Pick the group matching the job about to be submitted** (`--match`), not the
+  array-wide maximum. `--by name` restores the lump-everything view, and warns
+  when peak ≫ median (a sign the tasks were not alike).
+
+For each group it compares requested `--time` / memory with the peak used by
+COMPLETED tasks and suggests 1.5x that peak. Apply it:
+
+- **Set `--time` and `--mem` to ~1.5x the observed peak**, not the old request.
+  Overlong walltimes also hurt: short jobs get backfilled into scheduling gaps,
+  long ones wait.
+- **Never shrink after a failure.** If any task hit `TIMEOUT` or `OUT_OF_MEMORY`,
+  the limit was too small; `rightsize` then says RAISE — follow that.
+- **Only transfer sizing between comparable jobs.** If the new job is bigger
+  (longer sequences, larger batch, more iterations), scale the peak by the
+  expected cost ratio first (e.g. attention costs ~N^2 per step), then apply 1.5x.
+- **Arrays never go below `--time=01:02:00`.** At <=61 min an array lands in the
+  `gpu-test` QOS and is rejected (`QOSMaxSubmitJobPerUserLimit`); `rightsize`
+  applies this floor automatically. Single short jobs may go lower.
+- **Split mixed-size arrays.** One `--time` covers the whole array, so a few big
+  tasks force a long limit on all the small ones; submit size classes separately,
+  each sized from its own configuration group.
+- **Diverged or early-stopped tasks finish fast but still read as COMPLETED**;
+  don't size a healthy configuration from them.
+- **GPU memory is not in `sacct`** (MaxRSS is host RAM). Check GPU memory with
+  `della.sh jobstats <jobid>` before cutting anything GPU-related.
+- **Tell the user** what you changed, old -> new, when you resize a request.
+
 ## Cautions
 
 - Keep cancellations, remote overwrites/deletions, submissions, and retries within the user-authorized scope. Ask only when that scope does not already authorize the action; avoid unbounded resubmission loops.
@@ -173,3 +241,27 @@ Princeton cluster utilities. The `logs` fallback assumes `slurm-<jobid>.out`;
 for completed jobs with custom output paths, read the configured file directly.
 `gpucheck` prints diagnostics but may exit successfully even when a library
 check fails; inspect the reported CUDA availability and devices.
+
+## Connection failures
+
+Commands never open a fresh login when no session exists: they fail locally in
+milliseconds with a "No live SSH session ... Nothing was sent" message. Only
+`connect` (and the banner probe in `check`) touches the login node. This matters
+because a burst of failed logins gets the machine's address temporarily blocked.
+
+When a connection does fail, the script names the cause:
+
+- **"refusing connections ... Not allowed at this time"** — temporary server-side
+  block after repeated failed/rapid logins. Do NOT retry in a loop; wait
+  (minutes to an hour) or use another login node with the same /scratch:
+  `DELLA_HOST=della8.princeton.edu della.sh connect`.
+- **"password ... has expired"** — the user must change their NetID password
+  themselves, then `connect`. Never ask for or handle the password.
+- **"Authentication failed as <user>@<host>"** — wrong NetID (`DELLA_USER` or
+  `~/.config/della/user`), changed/expired password, or Duo not approved. Stop
+  after one or two attempts.
+- **"Cannot reach"** — off campus without the Princeton VPN.
+
+The login itself (password + Duo) always needs the user: ask them to run
+`! ~/.claude/skills/della/scripts/della.sh connect`. After a session is live,
+do not poll the cluster more often than every ~20 minutes.
