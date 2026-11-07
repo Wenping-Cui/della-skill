@@ -11,7 +11,8 @@ set -euo pipefail
 # (~/.claude/skills/della for Claude Code, ~/.codex/skills/della for Codex, ...).
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
-HOST="${DELLA_HOST:-della9.princeton.edu}"
+# GPU work goes through the GPU login node; della9/della8 are CPU-side login nodes.
+HOST="${DELLA_HOST:-della-gpu.princeton.edu}"
 # Cluster account (NetID): $DELLA_USER, else the one-line file
 # ~/.config/della/user -- kept OUT of this repository, which must never contain
 # account identifiers -- else whatever ~/.ssh/config sets for the host.
@@ -20,6 +21,7 @@ DELLA_USER="${DELLA_USER:-$( { tr -d '[:space:]' < "${DELLA_USER_FILE}"; } 2>/de
 CONNECT_TIMEOUT="${DELLA_CONNECT_TIMEOUT:-8}"
 ANACONDA_MODULE="${DELLA_ANACONDA_MODULE:-anaconda3/2024.2}"   # used by gpucheck
 CONDA_ENV="${DELLA_CONDA_ENV:-jax-gpu}"                        # default env for gpucheck
+GPU_PARTITION="${DELLA_PARTITION:-ailab}"                      # gpus/gputest/gpucheck (#SBATCH --partition=ailab)
 
 # ControlMaster sockets live here; ssh silently skips multiplexing if it is missing.
 mkdir -p "${HOME}/.ssh/sockets" && chmod 700 "${HOME}/.ssh/sockets"
@@ -95,7 +97,7 @@ extend it, so do not retry in a loop.
 
 Either wait, or log in through another login node (same /scratch filesystem):
 
-    DELLA_HOST=della8.princeton.edu $(printf '%q' "${SELF}") connect
+    DELLA_HOST=della9.princeton.edu $(printf '%q' "${SELF}") connect
 EOF
 }
 
@@ -193,10 +195,10 @@ Jobs
   test '<cmd>' [secs]           Sanity-run a command on the login node under `timeout` (default 30s)
 
 GPU
-  gpus [partitions]             Free GPUs by model (gfree) + per-node view (shownodes; default gpu,mig)
+  gpus [partitions]             Free GPUs by model (gfree) + per-node view (shownodes; default ailab)
   gputest '<cmd>' [min] [part] [gres]   Run cmd ON A GPU NODE via blocking srun
-                                (defaults: 10 min, partition mig, gpu:1)
-  gpucheck [conda-env]          Verify conda env sees the GPU (torch/jax) on a MIG slice
+                                (defaults: 10 min, partition ailab, gpu:1)
+  gpucheck [conda-env]          Verify conda env sees the GPU (torch/jax) on partition ailab
   jobstats <jobid>              Princeton job efficiency report (GPU util, memory, CPU)
   gpuwatch <jobid>              nvidia-smi on a RUNNING job's node (utilization snapshot)
 
@@ -204,7 +206,7 @@ Cluster
   quota                         checkquota (scratch/home usage)
   queue [partition]             Cluster load; with partition: sinfo + your pending reasons
 
-Environment: DELLA_HOST (default della9.princeton.edu), DELLA_USER (or ~/.config/della/user; else SSH configuration),
+Environment: DELLA_HOST (default della-gpu.princeton.edu), DELLA_PARTITION (default ailab), DELLA_USER (or ~/.config/della/user; else SSH configuration),
              DELLA_CONNECT_TIMEOUT (default 8), DELLA_ANACONDA_MODULE (default anaconda3/2024.2),
              DELLA_CONDA_ENV (default jax-gpu; used by gpucheck)
 EOF
@@ -392,13 +394,13 @@ case "$cmd" in
     ;;
 
   gpus)
-    p="${1:-gpu,mig}"
+    p="${1:-${GPU_PARTITION}}"
     remote "gfree 2>/dev/null; echo; shownodes -p $(printf '%q' "$p")"
     ;;
 
   gputest)
     [ $# -ge 1 ] || die "usage: della.sh gputest '<cmd>' [minutes] [partition] [gres]"
-    mins="${2:-10}"; part="${3:-mig}"; gres="${4:-gpu:1}"
+    mins="${2:-10}"; part="${3:-${GPU_PARTITION}}"; gres="${4:-gpu:1}"
     echo "Requesting ${gres} on partition ${part} for ${mins} min (blocks until a GPU is allocated)..." >&2
     remote "srun --partition=$(printf '%q' "$part") --gres=$(printf '%q' "$gres") --time=${mins} --job-name=gputest bash -lc $(printf '%q' "$1")"
     ;;
@@ -420,8 +422,8 @@ except Exception as e:
     cmd="module purge; module load ${ANACONDA_MODULE}; conda activate ${env_name}; nvidia-smi -L; python - <<'PYEOF'
 ${check_py}
 PYEOF"
-    echo "Verifying conda env '${env_name}' on a MIG GPU slice (blocks until allocated)..." >&2
-    remote "srun --partition=mig --gres=gpu:1 --time=5 --job-name=gpucheck bash -lc $(printf '%q' "$cmd")"
+    echo "Verifying conda env '${env_name}' on partition ${GPU_PARTITION} (blocks until allocated)..." >&2
+    remote "srun --partition=$(printf '%q' "${GPU_PARTITION}") --gres=gpu:1 --time=5 --job-name=gpucheck bash -lc $(printf '%q' "$cmd")"
     ;;
 
   jobstats)

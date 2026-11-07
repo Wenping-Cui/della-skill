@@ -55,14 +55,14 @@ That authenticates once (interactive password/Duo) and leaves a persistent maste
 socket; then retry. Without a live socket every remote command fails locally
 (nothing is sent to the cluster), so retrying before `connect` achieves nothing.
 
-The helper defaults to `della9.princeton.edu` with explicit multiplexing options
+The helper defaults to the GPU login node `della-gpu.princeton.edu` with explicit multiplexing options
 and `ProxyJump=none`. The cluster account comes from `DELLA_USER`, else the
 one-line file `~/.config/della/user` (outside this repository), else the `User`
 that `~/.ssh/config` sets for the host. If none applies, SSH falls back to the
 local login name and every login fails with `Permission denied` — and repeated
 failures get the address blocked. Set it once with
 `mkdir -p ~/.config/della && echo <netid> > ~/.config/della/user`.
-`DELLA_HOST` overrides the host; `DELLA_ANACONDA_MODULE` and `DELLA_CONDA_ENV`
+`DELLA_HOST` overrides the host and `DELLA_PARTITION` the GPU partition (default `ailab`); `DELLA_ANACONDA_MODULE` and `DELLA_CONDA_ENV`
 set the module and conda env that `gpucheck` loads. Never put account
 identifiers, passwords, SSH keys, or tokens in this repository.
 
@@ -95,8 +95,8 @@ Host-specific notes:
 | Sanity-run before queueing | `test 'python train.py --tiny' [secs]` |
 | Disk quotas | `quota` |
 | Partition load + why jobs pend | `queue [partition]` |
-| GPU node availability | `gpus [partitions]` (default `gpu,mig`) |
-| Run a command on a GPU node | `gputest '<cmd>' [min] [partition] [gres]` |
+| GPU node availability | `gpus [partitions]` (default `ailab`) |
+| Run a command on a GPU node | `gputest '<cmd>' [min] [partition] [gres]` (default partition `ailab`) |
 | Verify conda env sees the GPU | `gpucheck [env]` (default env `jax-gpu`; override with `DELLA_CONDA_ENV` / `DELLA_ANACONDA_MODULE`) |
 | GPU/CPU/memory efficiency report | `jobstats <jobid>` (works on finished jobs) |
 | Live GPU utilization of a running job | `gpuwatch <jobid>` |
@@ -127,6 +127,12 @@ Exit code 124 means the timeout killed it; inspect output for the intended smoke
 
 ## GPU jobs (in-context-learning training runs)
 
+**This user's GPU setup (set by the user 2026-11-07; takes precedence over the inherited notes below):**
+- Log in through the GPU login node `della-gpu.princeton.edu` (the helper's default `DELLA_HOST`).
+- Every GPU job script uses `#SBATCH --partition=ailab`; `gpus`, `gputest`, and `gpucheck` default to it
+  (`DELLA_PARTITION` overrides). The `gpu`/`mig` notes below are for reference only.
+- If `della-gpu` blocks this address, `DELLA_HOST=della9.princeton.edu` reaches the same filesystems and Slurm.
+
 Inherited Della GPU notes (source skill recorded verification on 2026-08-29;
 not reverified during this conversion). Check live partitions, limits, modules,
 and project paths before relying on these values for a new workload:
@@ -148,20 +154,28 @@ and project paths before relying on these values for a new workload:
   whose submit limit is tiny → `QOSMaxSubmitJobPerUserLimit` rejections. Fix: set
   `--time=01:02:00` or longer so the array lands in `gpu-short`. MaxArraySize is 2501.
 - Compute nodes have **no internet** — download datasets/checkpoints on the login node first.
+- **Never pass variables with `sbatch --export=ALL,VAR=…` (or any explicit `--export`)** when the job script
+  loads modules: on Della an explicit `--export` propagates the submission shell's half-initialised module state
+  (`_LMFILES_` set, `LOADEDMODULES` empty) and `module purge` aborts with `Loaded environment state is
+  inconsistent` — a 94-task array died in 3 s this way (verified 2026-10-31). Set the variable inside the script
+  (thin per-array wrapper that sets it and sources a shared body) and submit with no `--export`, which gets a
+  fresh login environment.
+- A bare `--gres=gpu:1` without a constraint can land on a 10 GB MIG slice even on partition `gpu`; jobs needing
+  more memory must add `--constraint=gpu80` (232 GPUs) or `--constraint="nomig&gpu40"` (40). Della also rejects an
+  explicit `--partition=gpu` (verified 2026-10-30).
 - The `della-gpu.princeton.edu` login node has a GPU (handy for pip-installing CUDA
-  wheels), but it needs its own Duo login; the MIG-based `gpucheck` avoids that.
+  wheels); it is now the default login node, so one Duo login covers it.
 - Example training env: `module load anaconda3/2024.2` + `conda activate jax-gpu`
   (PyTorch + JAX). Job scripts live in the project dir as `train_*.slurm` and use
   job arrays over parameter grids.
 
 **GPU debug order** (before and after the CPU-side checks above):
-1. New/changed environment? `gpucheck` first — allocates a MIG slice and prints
+1. New/changed environment? `gpucheck` first — allocates one `ailab` GPU and prints
    `nvidia-smi -L`, torch version + `cuda_available`, jax devices. Catches
    CPU-only torch builds and broken CUDA modules in ~a minute.
 2. Code changed? `gputest 'cd /scratch/gpfs/$USER/proj && python train.py --tiny' 10`
    — real GPU node, 10-min cap, catches CUDA OOM and device-placement bugs cheaply.
-   Use partition `mig` for small models; pass `gputest ... 15 gpu` when the tiny run
-   itself needs a full A100.
+   Defaults to partition `ailab`; pass another partition as the third argument only if needed.
 3. Job running but slow? `gpuwatch <jobid>` — if GPU-Util is ~0%: the env fell back
    to CPU (check the log for `cuda_available: False`), or the code isn't GPU-enabled,
    or a module/library is missing. If low but nonzero (<15%): dataloader-bound —
@@ -254,7 +268,7 @@ When a connection does fail, the script names the cause:
 - **"refusing connections ... Not allowed at this time"** — temporary server-side
   block after repeated failed/rapid logins. Do NOT retry in a loop; wait
   (minutes to an hour) or use another login node with the same /scratch:
-  `DELLA_HOST=della8.princeton.edu della.sh connect`.
+  `DELLA_HOST=della9.princeton.edu della.sh connect`.
 - **"password ... has expired"** — the user must change their NetID password
   themselves, then `connect`. Never ask for or handle the password.
 - **"Authentication failed as <user>@<host>"** — wrong NetID (`DELLA_USER` or

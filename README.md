@@ -47,7 +47,8 @@ Put the export in your shell profile so it applies to every session.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `DELLA_HOST` | `della9.princeton.edu` | login node to target |
+| `DELLA_HOST` | `della-gpu.princeton.edu` | login node to target (GPU login node) |
+| `DELLA_PARTITION` | `ailab` | partition for `gpus`, `gputest`, `gpucheck` |
 | `DELLA_USER` | unset | cluster account |
 | `DELLA_CONNECT_TIMEOUT` | `8` | seconds before a dead connection fails fast |
 | `DELLA_ANACONDA_MODULE` | `anaconda3/2024.2` | module `gpucheck` loads |
